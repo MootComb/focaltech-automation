@@ -9,9 +9,10 @@
 #include <pthread.h>
 #include <libusb-1.0/libusb.h>
 #include <mosquitto.h>
-#include <curl/curl.h>
 
-// Performance tuning
+#define DEBUG 1
+
+// Calibration
 #define CAPTURE_INTERVAL 50000        // 50ms = 20 FPS - Sensor polling rate in microseconds. 
                                       // Lower = more responsive but higher CPU usage.
                                       // 50000µs = 20 captures/second. Min: 10000, Max: 100000.
@@ -38,27 +39,20 @@
                                       // 2-5 = smoother but adds slight latency.
                                       // Each frame = +50ms delay (based on CAPTURE_INTERVAL).
                                       // Trade-off: smoothness vs responsiveness.
-#define DEBUG 1
 
-// Connection config
 #define MQTT_HOST "localhost"
 #define MQTT_PORT 1883
 #define MQTT_USERNAME "your_mqtt_username"
 #define MQTT_PASSWORD "your_mqtt_password"
 #define MQTT_TOPIC "fingerprint/action"
+#define MQTT_KEEPALIVE 60
+#define MQTT_RECONNECT_DELAY 5
 
-#define HTTP_HOST "localhost"
-#define HTTP_PORT 8123
-#define HTTP_TOKEN "your_long_lived_token_here"
-#define CONNECTION_TYPE 0             // 0 = MQTT, 1 = HTTP
-
-// USB IDs
 #define VENDOR_ID  0x2808
 #define PRODUCT_ID 0xc652
 #define OUT_ENDPOINT 0x01
 #define IN_ENDPOINT 0x82
 
-// Image parameters
 #define IMAGE_WIDTH 64
 #define IMAGE_HEIGHT 80
 #define HEADER_OFFSET 4
@@ -68,16 +62,14 @@
 #define NUM_PIXELS (IMAGE_WIDTH * IMAGE_HEIGHT)
 #define MAX_TAP_SEQUENCE 10
 
-// FocalTech commands
-static const unsigned char CMD_STATUS[]      = {0x37, 0x01, 0x01, 0x01};
-static const unsigned char CMD_PREPARE[]     = {0x80, 0x02, 0x01};
-static const unsigned char CMD_CAPTURE[]     = {0x82, 0x73, 0x01};
-static const unsigned char CMD_IMAGE[]       = {0x81};
+static const unsigned char CMD_STATUS[]  = {0x37, 0x01, 0x01, 0x01};
+static const unsigned char CMD_PREPARE[] = {0x80, 0x02, 0x01};
+static const unsigned char CMD_CAPTURE[] = {0x82, 0x73, 0x01};
+static const unsigned char CMD_IMAGE[]   = {0x81};
 
-// Globals
 static struct mosquitto *mosq = NULL;
-static int mqtt_connected = 0;
-static CURL *curl = NULL;
+static volatile int mqtt_connected = 0;
+static volatile int running = 1;
 static double baseline_brightness = 0.0;
 static int is_touching = 0;
 static double tap_times[MAX_TAP_SEQUENCE];
@@ -85,19 +77,15 @@ static int tap_count = 0;
 static double brightness_history[SMOOTHING_FRAMES];
 static int history_index = 0;
 static int history_filled = 0;
+static pthread_mutex_t mqtt_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t tap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Debug macro
 #define DEBUG_PRINT(fmt, ...) do { if (DEBUG) printf(fmt, ##__VA_ARGS__); } while(0)
 
 static inline double get_time(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
-}
-
-static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
-    (void)contents; (void)userp;
-    return size * nmemb;
 }
 
 static inline unsigned char checksum(const unsigned char *data, int len) {
@@ -165,66 +153,39 @@ static const char* tap_to_string(int count) {
     }
 }
 
-static int init_http(void) {
-    curl_global_init(CURL_GLOBAL_ALL);
-    curl = curl_easy_init();
-    if (!curl) { fprintf(stderr, "HTTP init failed\n"); return -1; }
-    DEBUG_PRINT("HTTP client initialized\n");
-    return 0;
-}
-
-static void http_post(const char *payload) {
-    if (!curl) return;
-    char url[512];
-    struct curl_slist *headers = NULL;
-    snprintf(url, sizeof(url), "http://%s:%d/api/webhook/%s", HTTP_HOST, HTTP_PORT, payload);
-    snprintf(url, sizeof(url), "http://%s:%d/api/webhook/fingerprint_%s", HTTP_HOST, HTTP_PORT, payload);
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    char auth[256];
-    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", HTTP_TOKEN);
-    headers = curl_slist_append(headers, auth);
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "{}");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
-    CURLcode res = curl_easy_perform(curl);
-    DEBUG_PRINT("  HTTP: %s [%s]\n", payload, res == CURLE_OK ? "OK" : curl_easy_strerror(res));
-    curl_slist_free_all(headers);
-}
-
-static int init_mqtt(void) {
-    mosquitto_lib_init();
-    mosq = mosquitto_new(NULL, true, NULL);
-    if (!mosq) { fprintf(stderr, "MQTT create failed\n"); return -1; }
-    if (strlen(MQTT_USERNAME) > 0) mosquitto_username_pw_set(mosq, MQTT_USERNAME, MQTT_PASSWORD);
-    if (mosquitto_connect(mosq, MQTT_HOST, MQTT_PORT, 60)) { fprintf(stderr, "MQTT connect failed\n"); return -1; }
-    mqtt_connected = 1;
-    DEBUG_PRINT("MQTT connected to %s:%d\n", MQTT_HOST, MQTT_PORT);
-    return 0;
-}
-
 static void mqtt_publish(const char *payload) {
-    if (!mqtt_connected || !mosq) return;
-    mosquitto_publish(mosq, NULL, MQTT_TOPIC, strlen(payload), payload, 0, false);
-    DEBUG_PRINT("  MQTT: %s -> %s\n", MQTT_TOPIC, payload);
-}
-
-static void send_action(const char *payload) {
-    if (CONNECTION_TYPE == 0) mqtt_publish(payload);
-    else http_post(payload);
+    pthread_mutex_lock(&mqtt_mutex);
+    if (!mqtt_connected || !mosq) {
+        pthread_mutex_unlock(&mqtt_mutex);
+        return;
+    }
+    int ret = mosquitto_publish(mosq, NULL, MQTT_TOPIC, strlen(payload), payload, 0, false);
+    if (ret == MOSQ_ERR_SUCCESS) {
+        DEBUG_PRINT("  MQTT: %s -> %s\n", MQTT_TOPIC, payload);
+    } else if (ret == MOSQ_ERR_NO_CONN) {
+        DEBUG_PRINT("  MQTT publish failed: no connection\n");
+        mqtt_connected = 0;
+    } else {
+        DEBUG_PRINT("  MQTT publish error: %d\n", ret);
+    }
+    pthread_mutex_unlock(&mqtt_mutex);
 }
 
 static void process_taps(void) {
-    if (tap_count == 0) return;
+    pthread_mutex_lock(&tap_mutex);
+    if (tap_count == 0) {
+        pthread_mutex_unlock(&tap_mutex);
+        return;
+    }
     const char *action = tap_to_string(tap_count);
     if (action) {
         DEBUG_PRINT("\n    Processing %d tap(s) -> %s\n", tap_count, action);
-        send_action(action);
+        mqtt_publish(action);
     } else {
         DEBUG_PRINT("\n    No action for %d taps\n", tap_count);
     }
     tap_count = 0;
+    pthread_mutex_unlock(&tap_mutex);
 }
 
 static int calibrate(libusb_device_handle *h) {
@@ -247,12 +208,102 @@ static int calibrate(libusb_device_handle *h) {
     return 0;
 }
 
+static void mqtt_connect_callback(struct mosquitto *m, void *obj, int result) {
+    (void)m; (void)obj;
+    pthread_mutex_lock(&mqtt_mutex);
+    if (result == 0) {
+        mqtt_connected = 1;
+        DEBUG_PRINT("MQTT connected successfully\n");
+    } else {
+        mqtt_connected = 0;
+        DEBUG_PRINT("MQTT connection failed: %d\n", result);
+    }
+    pthread_mutex_unlock(&mqtt_mutex);
+}
+
+static void mqtt_disconnect_callback(struct mosquitto *m, void *obj, int rc) {
+    (void)m; (void)obj;
+    pthread_mutex_lock(&mqtt_mutex);
+    mqtt_connected = 0;
+    DEBUG_PRINT("MQTT disconnected: %d\n", rc);
+    pthread_mutex_unlock(&mqtt_mutex);
+}
+
+static void *mqtt_thread(void *arg) {
+    (void)arg;
+    int reconnect_delay = 1;
+    
+    while (running) {
+        pthread_mutex_lock(&mqtt_mutex);
+        if (mosq) {
+            mosquitto_destroy(mosq);
+            mosq = NULL;
+        }
+        mqtt_connected = 0;
+        pthread_mutex_unlock(&mqtt_mutex);
+        
+        mosq = mosquitto_new(NULL, true, NULL);
+        if (!mosq) {
+            DEBUG_PRINT("MQTT: failed to create client, retrying in %ds\n", MQTT_RECONNECT_DELAY);
+            sleep(MQTT_RECONNECT_DELAY);
+            continue;
+        }
+        
+        mosquitto_connect_callback_set(mosq, mqtt_connect_callback);
+        mosquitto_disconnect_callback_set(mosq, mqtt_disconnect_callback);
+        
+        if (strlen(MQTT_USERNAME) > 0) {
+            mosquitto_username_pw_set(mosq, MQTT_USERNAME, MQTT_PASSWORD);
+        }
+        
+        int ret = mosquitto_connect(mosq, MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE);
+        if (ret != MOSQ_ERR_SUCCESS) {
+            DEBUG_PRINT("MQTT: connection failed (%d), retrying in %ds\n", ret, MQTT_RECONNECT_DELAY);
+            mosquitto_destroy(mosq);
+            mosq = NULL;
+            sleep(MQTT_RECONNECT_DELAY);
+            continue;
+        }
+        
+        DEBUG_PRINT("MQTT connecting to %s:%d\n", MQTT_HOST, MQTT_PORT);
+        reconnect_delay = 1;
+        
+        while (running) {
+            ret = mosquitto_loop(mosq, 1000, 1);
+            if (ret == MOSQ_ERR_NO_CONN || ret == MOSQ_ERR_CONN_LOST || ret == MOSQ_ERR_CONN_REFUSED) {
+                pthread_mutex_lock(&mqtt_mutex);
+                mqtt_connected = 0;
+                pthread_mutex_unlock(&mqtt_mutex);
+                DEBUG_PRINT("MQTT connection lost, reconnecting in %ds\n", reconnect_delay);
+                sleep(reconnect_delay);
+                if (reconnect_delay < MQTT_RECONNECT_DELAY) reconnect_delay *= 2;
+                if (reconnect_delay > MQTT_RECONNECT_DELAY) reconnect_delay = MQTT_RECONNECT_DELAY;
+                break;
+            }
+            if (ret != MOSQ_ERR_SUCCESS) {
+                DEBUG_PRINT("MQTT loop error: %d\n", ret);
+            }
+        }
+    }
+    
+    pthread_mutex_lock(&mqtt_mutex);
+    if (mosq) {
+        mosquitto_disconnect(mosq);
+        mosquitto_destroy(mosq);
+        mosq = NULL;
+    }
+    mqtt_connected = 0;
+    pthread_mutex_unlock(&mqtt_mutex);
+    
+    return NULL;
+}
+
 static void *sensor_thread(void *arg) {
     libusb_device_handle *h = (libusb_device_handle *)arg;
     unsigned char pixels[NUM_PIXELS];
     DEBUG_PRINT("Monitoring started. Threshold: %.1f, Multi-tap timeout: %.1fs\n\n", FINGER_THRESHOLD, MULTI_TAP_TIMEOUT);
     
-    while (1) {
+    while (running) {
         if (capture_frame(h, pixels) < 0) {
             struct timespec ts = {0, CAPTURE_INTERVAL * 1000}; nanosleep(&ts, NULL);
             continue;
@@ -262,21 +313,30 @@ static void *sensor_thread(void *arg) {
         double delta = fabs(brightness - baseline_brightness);
         double now = get_time();
         
-        if (tap_count > 0 && !is_touching && now - tap_times[tap_count - 1] > MULTI_TAP_TIMEOUT)
+        pthread_mutex_lock(&tap_mutex);
+        if (tap_count > 0 && !is_touching && now - tap_times[tap_count - 1] > MULTI_TAP_TIMEOUT) {
+            pthread_mutex_unlock(&tap_mutex);
             process_taps();
+        } else {
+            pthread_mutex_unlock(&tap_mutex);
+        }
         
         if (!is_touching && delta > FINGER_THRESHOLD) {
             is_touching = 1;
+            pthread_mutex_lock(&tap_mutex);
             DEBUG_PRINT("[TOUCH] Tap #%d | Brightness: %.1f (Δ=%.1f)\n", tap_count + 1, brightness, delta);
+            pthread_mutex_unlock(&tap_mutex);
         }
         
         if (is_touching && delta <= FINGER_THRESHOLD) {
             is_touching = 0;
+            pthread_mutex_lock(&tap_mutex);
             if (tap_count < MAX_TAP_SEQUENCE) {
                 tap_times[tap_count] = now;
                 tap_count++;
                 DEBUG_PRINT("         Released -> Tap #%d\n", tap_count);
             }
+            pthread_mutex_unlock(&tap_mutex);
         }
         
         struct timespec ts = {0, CAPTURE_INTERVAL * 1000}; nanosleep(&ts, NULL);
@@ -289,8 +349,8 @@ int main(int argc, char *argv[]) {
     libusb_device_handle *handle = NULL;
     
     printf("\nFingerprint Sensor\n");
-    printf("Device: %04x:%04x | Protocol: %s | Debug: %s\n\n", 
-           VENDOR_ID, PRODUCT_ID, CONNECTION_TYPE == 0 ? "MQTT" : "HTTP", DEBUG ? "ON" : "OFF");
+    printf("Device: %04x:%04x | Protocol: MQTT | Debug: %s\n\n", 
+           VENDOR_ID, PRODUCT_ID, DEBUG ? "ON" : "OFF");
     
     if (libusb_init(NULL) < 0) { fprintf(stderr, "libusb init failed\n"); return 1; }
     handle = libusb_open_device_with_vid_pid(NULL, VENDOR_ID, PRODUCT_ID);
@@ -301,15 +361,29 @@ int main(int argc, char *argv[]) {
     if (libusb_claim_interface(handle, 0) < 0) { fprintf(stderr, "Interface claim failed\n"); libusb_close(handle); libusb_exit(NULL); return 1; }
     libusb_reset_device(handle);
     
-    if (CONNECTION_TYPE == 0) init_mqtt(); else init_http();
-    if (calibrate(handle) < 0) { libusb_release_interface(handle, 0); libusb_close(handle); libusb_exit(NULL); return 1; }
+    mosquitto_lib_init();
     
-    pthread_t thread;
-    pthread_create(&thread, NULL, sensor_thread, handle);
-    pthread_join(thread, NULL);
+    pthread_t mqtt_tid, sensor_tid;
+    pthread_create(&mqtt_tid, NULL, mqtt_thread, NULL);
     
-    if (mqtt_connected) { mosquitto_disconnect(mosq); mosquitto_destroy(mosq); mosquitto_lib_cleanup(); }
-    if (curl) { curl_easy_cleanup(curl); curl_global_cleanup(); }
+    if (calibrate(handle) < 0) { 
+        running = 0;
+        pthread_join(mqtt_tid, NULL);
+        mosquitto_lib_cleanup();
+        libusb_release_interface(handle, 0); 
+        libusb_close(handle); 
+        libusb_exit(NULL); 
+        return 1; 
+    }
+    
+    pthread_create(&sensor_tid, NULL, sensor_thread, handle);
+    
+    pthread_join(sensor_tid, NULL);
+    
+    running = 0;
+    pthread_join(mqtt_tid, NULL);
+    
+    mosquitto_lib_cleanup();
     libusb_release_interface(handle, 0);
     libusb_close(handle);
     libusb_exit(NULL);
