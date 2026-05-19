@@ -1,11 +1,11 @@
 # FocalTech Automation
 
-Turn a FocalTech 2808:c652 USB fingerprint sensor into a multi-tap smart home controller via MQTT or HTTP.
+Turn a FocalTech 2808:c652 USB fingerprint sensor into a multi-tap smart home controller via MQTT.
 
 ## Features
 
 - 👆 Multi-tap detection (1-5 taps)
-- 🔌 Homeassistant integration
+- 🔌 MQTT integration
 
 ## Hardware
 
