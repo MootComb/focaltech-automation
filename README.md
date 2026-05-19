@@ -45,17 +45,10 @@ nano fingerprint.c
 Edit these lines:
 
 ```c
-#define CONNECTION_TYPE 0             // 0 = MQTT, 1 = HTTP
-
 #define MQTT_HOST "localhost"
 #define MQTT_PORT 1883
 #define MQTT_USERNAME "your_mqtt_username"
 #define MQTT_PASSWORD "your_mqtt_password"
-#define MQTT_TOPIC "fingerprint/action"
-
-#define HTTP_HOST "localhost"
-#define HTTP_PORT 8123
-#define HTTP_TOKEN "your_long_lived_token_here"
 ```
 
 ### 3. Build
