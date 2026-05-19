@@ -71,7 +71,7 @@ make
 sudo ./fingerprint
 ```
 
-### 5. Setup
+### 5. Setup autostart
 ```bash
-sudo ./setup
+sudo ./setup.sh
 ```
