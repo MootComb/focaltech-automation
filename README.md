@@ -70,3 +70,8 @@ make
 ```bash
 sudo ./fingerprint
 ```
+
+### 5. Setup
+```bash
+sudo ./setup
+```
