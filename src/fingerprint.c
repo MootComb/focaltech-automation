@@ -12,41 +12,31 @@
 
 #define DEBUG 1
 
-// Calibration
-#define CAPTURE_INTERVAL 50000        // 50ms = 20 FPS - Sensor polling rate in microseconds. 
-                                      // Lower = more responsive but higher CPU usage.
-                                      // 50000µs = 20 captures/second. Min: 10000, Max: 100000.
+#define DEFAULT_CAPTURE_INTERVAL 50000
+#define DEFAULT_BASELINE_SAMPLES 10
+#define DEFAULT_FINGER_THRESHOLD 15.0
+#define DEFAULT_MULTI_TAP_TIMEOUT 0.5
+#define DEFAULT_SMOOTHING_FRAMES 1
+#define DEFAULT_MQTT_HOST "localhost"
+#define DEFAULT_MQTT_PORT 1883
+#define DEFAULT_MQTT_USERNAME ""
+#define DEFAULT_MQTT_PASSWORD ""
+#define DEFAULT_MQTT_TOPIC "fingerprint/action"
+#define DEFAULT_MQTT_KEEPALIVE 60
+#define DEFAULT_MQTT_RECONNECT_DELAY 5
 
-#define BASELINE_SAMPLES 10           // Calibration sample count at startup.
-                                      // More samples = more accurate baseline brightness.
-                                      // Used to establish "no finger" reference level.
-                                      // Range: 5-50. Higher = longer calibration time.
-
-#define FINGER_THRESHOLD 15.0         // Brightness change threshold to detect touch.
-                                      // |current - baseline| > 15 = finger detected.
-                                      // 0-255 scale (8-bit pixel values).
-                                      // Lower = more sensitive, may cause false triggers.
-                                      // Higher = requires firmer press. Range: 5-50.
-
-#define MULTI_TAP_TIMEOUT 0.5         // Max delay between taps in seconds.
-                                      // If next tap doesn't occur within 0.5s,
-                                      // current tap sequence is processed.
-                                      // 0.3-0.7s typical. Lower = faster response but
-                                      // harder to perform multi-taps.
-
-#define SMOOTHING_FRAMES 1            // Number of frames to average for noise reduction.
-                                      // 1 = no smoothing (raw values).
-                                      // 2-5 = smoother but adds slight latency.
-                                      // Each frame = +50ms delay (based on CAPTURE_INTERVAL).
-                                      // Trade-off: smoothness vs responsiveness.
-
-#define MQTT_HOST "localhost"
-#define MQTT_PORT 1883
-#define MQTT_USERNAME "your_mqtt_username"
-#define MQTT_PASSWORD "your_mqtt_password"
-#define MQTT_TOPIC "fingerprint/action"
-#define MQTT_KEEPALIVE 60
-#define MQTT_RECONNECT_DELAY 5
+static int CAPTURE_INTERVAL = DEFAULT_CAPTURE_INTERVAL;
+static int BASELINE_SAMPLES = DEFAULT_BASELINE_SAMPLES;
+static double FINGER_THRESHOLD = DEFAULT_FINGER_THRESHOLD;
+static double MULTI_TAP_TIMEOUT = DEFAULT_MULTI_TAP_TIMEOUT;
+static int SMOOTHING_FRAMES = DEFAULT_SMOOTHING_FRAMES;
+static char MQTT_HOST[256] = DEFAULT_MQTT_HOST;
+static int MQTT_PORT = DEFAULT_MQTT_PORT;
+static char MQTT_USERNAME[128] = DEFAULT_MQTT_USERNAME;
+static char MQTT_PASSWORD[128] = DEFAULT_MQTT_PASSWORD;
+static char MQTT_TOPIC[256] = DEFAULT_MQTT_TOPIC;
+static int MQTT_KEEPALIVE = DEFAULT_MQTT_KEEPALIVE;
+static int MQTT_RECONNECT_DELAY = DEFAULT_MQTT_RECONNECT_DELAY;
 
 #define VENDOR_ID  0x2808
 #define PRODUCT_ID 0xc652
@@ -74,13 +64,107 @@ static double baseline_brightness = 0.0;
 static int is_touching = 0;
 static double tap_times[MAX_TAP_SEQUENCE];
 static int tap_count = 0;
-static double brightness_history[SMOOTHING_FRAMES];
+static double *brightness_history = NULL;
 static int history_index = 0;
 static int history_filled = 0;
 static pthread_mutex_t mqtt_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t tap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define DEBUG_PRINT(fmt, ...) do { if (DEBUG) printf(fmt, ##__VA_ARGS__); } while(0)
+
+static char* trim(char *str) {
+    while (*str == ' ' || *str == '\t') str++;
+    char *end = str + strlen(str) - 1;
+    while (end > str && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
+        *end-- = '\0';
+    }
+    return str;
+}
+
+static int load_env(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        DEBUG_PRINT("No .env file found at %s, using defaults\n", filename);
+        return 0;
+    }
+    
+    char line[512];
+    int loaded = 0;
+    
+    while (fgets(line, sizeof(line), file)) {
+        char *trimmed = trim(line);
+        if (trimmed[0] == '#' || trimmed[0] == '\0') continue;
+        
+        char *equals = strchr(trimmed, '=');
+        if (!equals) continue;
+        
+        *equals = '\0';
+        char *key = trim(trimmed);
+        char *value = trim(equals + 1);
+        
+        if (value[0] == '"' || value[0] == '\'') {
+            value++;
+            value[strlen(value) - 1] = '\0';
+        }
+        
+        if (strcmp(key, "CAPTURE_INTERVAL") == 0) {
+            CAPTURE_INTERVAL = atoi(value);
+            loaded++;
+        }
+        else if (strcmp(key, "BASELINE_SAMPLES") == 0) {
+            BASELINE_SAMPLES = atoi(value);
+            loaded++;
+        }
+        else if (strcmp(key, "FINGER_THRESHOLD") == 0) {
+            FINGER_THRESHOLD = atof(value);
+            loaded++;
+        }
+        else if (strcmp(key, "MULTI_TAP_TIMEOUT") == 0) {
+            MULTI_TAP_TIMEOUT = atof(value);
+            loaded++;
+        }
+        else if (strcmp(key, "SMOOTHING_FRAMES") == 0) {
+            SMOOTHING_FRAMES = atoi(value);
+            loaded++;
+        }
+        else if (strcmp(key, "MQTT_HOST") == 0) {
+            strncpy(MQTT_HOST, value, sizeof(MQTT_HOST) - 1);
+            MQTT_HOST[sizeof(MQTT_HOST) - 1] = '\0';
+            loaded++;
+        }
+        else if (strcmp(key, "MQTT_PORT") == 0) {
+            MQTT_PORT = atoi(value);
+            loaded++;
+        }
+        else if (strcmp(key, "MQTT_USERNAME") == 0) {
+            strncpy(MQTT_USERNAME, value, sizeof(MQTT_USERNAME) - 1);
+            MQTT_USERNAME[sizeof(MQTT_USERNAME) - 1] = '\0';
+            loaded++;
+        }
+        else if (strcmp(key, "MQTT_PASSWORD") == 0) {
+            strncpy(MQTT_PASSWORD, value, sizeof(MQTT_PASSWORD) - 1);
+            MQTT_PASSWORD[sizeof(MQTT_PASSWORD) - 1] = '\0';
+            loaded++;
+        }
+        else if (strcmp(key, "MQTT_TOPIC") == 0) {
+            strncpy(MQTT_TOPIC, value, sizeof(MQTT_TOPIC) - 1);
+            MQTT_TOPIC[sizeof(MQTT_TOPIC) - 1] = '\0';
+            loaded++;
+        }
+        else if (strcmp(key, "MQTT_KEEPALIVE") == 0) {
+            MQTT_KEEPALIVE = atoi(value);
+            loaded++;
+        }
+        else if (strcmp(key, "MQTT_RECONNECT_DELAY") == 0) {
+            MQTT_RECONNECT_DELAY = atoi(value);
+            loaded++;
+        }
+    }
+    
+    fclose(file);
+    DEBUG_PRINT("Loaded %d settings from %s\n", loaded, filename);
+    return loaded;
+}
 
 static inline double get_time(void) {
     struct timespec ts;
@@ -189,7 +273,8 @@ static void process_taps(void) {
 }
 
 static int calibrate(libusb_device_handle *h) {
-    unsigned char pixels[NUM_PIXELS];
+    unsigned char *pixels = malloc(NUM_PIXELS);
+    if (!pixels) return -1;
     double sum = 0.0;
     int samples = 0;
     DEBUG_PRINT("Calibrating baseline (%d samples)...\n", BASELINE_SAMPLES);
@@ -202,6 +287,7 @@ static int calibrate(libusb_device_handle *h) {
         }
         struct timespec ts = {0, 100000000}; nanosleep(&ts, NULL);
     }
+    free(pixels);
     if (!samples) { fprintf(stderr, "No calibration samples!\n"); return -1; }
     baseline_brightness = sum / samples;
     DEBUG_PRINT("Baseline: %.1f\n\n", baseline_brightness);
@@ -300,7 +386,8 @@ static void *mqtt_thread(void *arg) {
 
 static void *sensor_thread(void *arg) {
     libusb_device_handle *h = (libusb_device_handle *)arg;
-    unsigned char pixels[NUM_PIXELS];
+    unsigned char *pixels = malloc(NUM_PIXELS);
+    if (!pixels) return NULL;
     DEBUG_PRINT("Monitoring started. Threshold: %.1f, Multi-tap timeout: %.1fs\n\n", FINGER_THRESHOLD, MULTI_TAP_TIMEOUT);
     
     while (running) {
@@ -341,6 +428,7 @@ static void *sensor_thread(void *arg) {
         
         struct timespec ts = {0, CAPTURE_INTERVAL * 1000}; nanosleep(&ts, NULL);
     }
+    free(pixels);
     return NULL;
 }
 
@@ -348,17 +436,28 @@ int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     libusb_device_handle *handle = NULL;
     
-    printf("\nFingerprint Sensor\n");
-    printf("Device: %04x:%04x | Protocol: MQTT | Debug: %s\n\n", 
-           VENDOR_ID, PRODUCT_ID, DEBUG ? "ON" : "OFF");
+    if (load_env(".env") == 0) {
+        DEBUG_PRINT("No .env file found, using default settings\n");
+    }
     
-    if (libusb_init(NULL) < 0) { fprintf(stderr, "libusb init failed\n"); return 1; }
+    brightness_history = malloc(SMOOTHING_FRAMES * sizeof(double));
+    if (!brightness_history) {
+        fprintf(stderr, "Failed to allocate memory\n");
+        return 1;
+    }
+    
+    printf("\nFingerprint Sensor\n");
+    printf("Device: %04x:%04x | Protocol: MQTT | Debug: %s\n", 
+           VENDOR_ID, PRODUCT_ID, DEBUG ? "ON" : "OFF");
+    printf("MQTT: %s:%d | Topic: %s\n\n", MQTT_HOST, MQTT_PORT, MQTT_TOPIC);
+    
+    if (libusb_init(NULL) < 0) { fprintf(stderr, "libusb init failed\n"); free(brightness_history); return 1; }
     handle = libusb_open_device_with_vid_pid(NULL, VENDOR_ID, PRODUCT_ID);
-    if (!handle) { fprintf(stderr, "Device not found\n"); libusb_exit(NULL); return 1; }
+    if (!handle) { fprintf(stderr, "Device not found\n"); libusb_exit(NULL); free(brightness_history); return 1; }
     DEBUG_PRINT("Device found\n");
     
     if (libusb_kernel_driver_active(handle, 0)) libusb_detach_kernel_driver(handle, 0);
-    if (libusb_claim_interface(handle, 0) < 0) { fprintf(stderr, "Interface claim failed\n"); libusb_close(handle); libusb_exit(NULL); return 1; }
+    if (libusb_claim_interface(handle, 0) < 0) { fprintf(stderr, "Interface claim failed\n"); libusb_close(handle); libusb_exit(NULL); free(brightness_history); return 1; }
     libusb_reset_device(handle);
     
     mosquitto_lib_init();
@@ -372,7 +471,8 @@ int main(int argc, char *argv[]) {
         mosquitto_lib_cleanup();
         libusb_release_interface(handle, 0); 
         libusb_close(handle); 
-        libusb_exit(NULL); 
+        libusb_exit(NULL);
+        free(brightness_history);
         return 1; 
     }
     
@@ -387,5 +487,6 @@ int main(int argc, char *argv[]) {
     libusb_release_interface(handle, 0);
     libusb_close(handle);
     libusb_exit(NULL);
+    free(brightness_history);
     return 0;
 }
