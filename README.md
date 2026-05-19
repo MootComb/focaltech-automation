@@ -39,16 +39,25 @@ cd focaltech-automation
 ### 2. Configure
 ```bash
 cd src
-nano fingerprint.c
+nano .env
 ```
 
 Edit these lines:
 
 ```c
-#define MQTT_HOST "localhost"
-#define MQTT_PORT 1883
-#define MQTT_USERNAME "your_mqtt_username"
-#define MQTT_PASSWORD "your_mqtt_password"
+CAPTURE_INTERVAL=50000
+BASELINE_SAMPLES=10
+FINGER_THRESHOLD=15.0
+MULTI_TAP_TIMEOUT=0.5
+SMOOTHING_FRAMES=1
+
+MQTT_HOST=localhost
+MQTT_PORT=1883
+MQTT_USERNAME=your_mqtt_username
+MQTT_PASSWORD=your_mqtt_password
+MQTT_TOPIC=fingerprint/action
+MQTT_KEEPALIVE=60
+MQTT_RECONNECT_DELAY=5
 ```
 
 ### 3. Build
