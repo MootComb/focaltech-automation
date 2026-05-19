@@ -1,0 +1,79 @@
+- id: '1779187352070'
+  alias: Sensor - One Tap
+  description: ''
+  triggers:
+  - trigger: mqtt
+    topic: fingerprint/action
+    payload: one
+  conditions: []
+  actions:
+  - action: switch.toggle
+    metadata: {}
+    data: {}
+    target:
+      entity_id: switch.example_one
+  mode: single
+
+- id: '1779187388094'
+  alias: Sensor - Two Taps
+  description: ''
+  triggers:
+  - trigger: mqtt
+    topic: fingerprint/action
+    payload: two
+  conditions: []
+  actions:
+  - action: switch.toggle
+    metadata: {}
+    data: {}
+    target:
+      entity_id: switch.example_two
+  mode: single
+
+- id: '1779187397863'
+  alias: Sensor - Three Taps
+  description: ''
+  triggers:
+  - trigger: mqtt
+    topic: fingerprint/action
+    payload: three
+  conditions: []
+  actions:
+  - action: switch.toggle
+    metadata: {}
+    data: {}
+    target:
+      entity_id: switch.example_three
+  mode: single
+
+- id: '1779187409403'
+  alias: Sensor - Four Taps
+  description: ''
+  triggers:
+  - trigger: mqtt
+    topic: fingerprint/action
+    payload: four
+  conditions: []
+  actions:
+  - action: light.toggle
+    metadata: {}
+    data: {}
+    target:
+      entity_id: light.example_four
+  mode: single
+
+- id: '1779187409404'
+  alias: Sensor - Five Taps
+  description: ''
+  triggers:
+  - trigger: mqtt
+    topic: fingerprint/action
+    payload: five
+  conditions: []
+  actions:
+  - action: switch.toggle
+    metadata: {}
+    data: {}
+    target:
+      entity_id: switch.example_five
+  mode: single
