@@ -376,6 +376,8 @@ static void *mqtt_thread(void *arg) {
     int mqtt_connected = 0;
     int reconnect_delay = 1;
     
+    mosquitto_lib_init();
+    
     while (atomic_load(&running)) {
         if (!mqtt_connected) {
             if (mosq) {
@@ -383,7 +385,6 @@ static void *mqtt_thread(void *arg) {
                 mosq = NULL;
             }
             
-            mosquitto_lib_init();
             mosq = mosquitto_new(NULL, true, NULL);
             if (!mosq) {
                 DEBUG_PRINT("MQTT: failed to create client, retrying in %ds\n", MQTT_RECONNECT_DELAY);
@@ -431,7 +432,7 @@ static void *mqtt_thread(void *arg) {
                 }
             }
             
-            int ret = mosquitto_loop(mosq, 0, 1);
+            int ret = mosquitto_loop(mosq, 100, 1);
             
             if (ret == MOSQ_ERR_NO_CONN || ret == MOSQ_ERR_CONN_LOST) {
                 DEBUG_PRINT("MQTT connection lost\n");
@@ -439,9 +440,6 @@ static void *mqtt_thread(void *arg) {
             } else if (ret != MOSQ_ERR_SUCCESS) {
                 DEBUG_PRINT("MQTT loop error: %s\n", mosquitto_strerror(ret));
             }
-            
-            struct timespec ts = {0, 100000000};
-            nanosleep(&ts, NULL);
         }
         
         if (!mqtt_connected && atomic_load(&running)) {
@@ -458,6 +456,7 @@ static void *mqtt_thread(void *arg) {
     }
     mosquitto_lib_cleanup();
     
+    DEBUG_PRINT("MQTT thread stopped\n");
     return NULL;
 }
 
@@ -532,6 +531,7 @@ static void cleanup_resources(libusb_device_handle *handle) {
 
 static void signal_handler(int sig) {
     (void)sig;
+    DEBUG_PRINT("\nReceived signal %d, shutting down...\n", sig);
     atomic_store(&running, 0);
 }
 
@@ -543,11 +543,14 @@ int main(int argc, char *argv[]) {
     pthread_t mqtt_tid, sensor_tid;
     
     struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    
+    signal(SIGPIPE, SIG_IGN);
     
     if (load_env(".env") == 0) {
         DEBUG_PRINT("No .env file found, using default settings\n");
@@ -621,8 +624,6 @@ int main(int argc, char *argv[]) {
     }
     
     pthread_join(sensor_tid, NULL);
-    
-    atomic_store(&running, 0);
     pthread_join(mqtt_tid, NULL);
     
     cleanup_resources(handle);
