@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -O3 -march=native -mtune=native -flto -std=c99 \
+CFLAGS = -O3 -march=native -mtune=native -std=c99 \
          -Wall -Wextra -Werror \
          -ffast-math -funroll-loops -fomit-frame-pointer \
          -finline-functions -finline-small-functions \
@@ -8,7 +8,7 @@ CFLAGS = -O3 -march=native -mtune=native -flto -std=c99 \
          -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
          -D_POSIX_C_SOURCE=199309L -D_GNU_SOURCE
 
-LDFLAGS = -flto -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections \
+LDFLAGS = -Wl,-O3 -Wl,--as-needed -Wl,--gc-sections \
           -Wl,-z,relro -Wl,-z,now
 
 LIBS = -lusb-1.0 -lmosquitto -lcurl -lm -lpthread
